@@ -592,7 +592,6 @@ impl Graph {
         Ok(())
     }
 
-    // XXX: take output port for target node and evaluate only that output
     pub fn evaluate_index(&self, graph_inputs: &Inputs, index: NodeIndex, port: FromPort) -> Result<Value> {
         match port {
             FromPort::Instance => Ok(Value::Instance(Box::new(self.g[index].clone()))),
