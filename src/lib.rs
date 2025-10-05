@@ -3,8 +3,6 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
-use alloc::format;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -15,6 +13,8 @@ use derive_more::Deref;
 use derive_more::DerefMut;
 use derive_more::IntoIterator;
 use hashbrown::HashMap;
+use heapless::format;
+use heapless::String;
 use petgraph::acyclic::Acyclic;
 use petgraph::data::Build as _;
 use petgraph::data::DataMapMut as _;
@@ -371,6 +371,25 @@ pub struct Instance {
     pub ty: Type
 }
 
+#[derive(Clone, Default)]
+pub struct Inputs {
+    elements: [Option<Value>; 8]
+}
+
+impl Inputs {
+    pub fn insert(&mut self, index: usize, v: Value) -> Result<()> {
+        let message1: String<28> = format!("input index {} out of bounds", index)?;
+        *self.elements.get_mut(index).context(message1)? = Some(v);
+        Ok(())
+    }
+
+    pub fn require(&self, index: usize) -> Result<&Value> {
+        let message1: String<28> = format!("input index {} out of bounds", index)?;
+        let message2: String<28> = format!("input index {} not connected", index)?;
+        self.elements.get(index).context(message1)?.as_ref().context(message2)
+    }
+}
+
 impl Instance {
     pub fn type_of_from_port(&self, port: FromPort) -> Result<&Type> {
         match port {
@@ -389,36 +408,32 @@ impl Instance {
         tuple.get(index).context("input port index out of bounds")
     }
 
-    pub fn evaluate(
-        &self,
-        graph_inputs: &[Value],
-        inputs: BTreeMap<usize, Value>
-    ) -> Result<Value> {
+    pub fn evaluate(&self, graph_inputs: &Inputs, inputs: &Inputs) -> Result<Value> {
         let x = match &self.data {
             InstanceData::Op(op) => match op {
                 Op::Constant(val) => Ok(val.clone()),
                 Op::Pure          => {
-                    let v = inputs.get(&0).context("port 0 unconnected")?.clone();
+                    let v = inputs.require(0)?.clone();
                     Ok(Value::Effect(Effect {
                         ret_ty: v.ty(),
                         thunk: Rc::new(move || Ok(v.clone()))
                     }))
                 },
                 Op::Bind          => {
-                    let v0 = inputs.get(&0).context("port 0 unconnected")?.clone();
-                    let v1 = inputs.get(&1).context("port 1 unconnected")?.clone();
+                    let v0 = inputs.require(0)?.clone();
+                    let v1 = inputs.require(1)?.clone();
                     match v0 {
                         Value::Effect(effect) => {
                             match v1 {
                                 Value::Instance(instance) => {
-                                    let graph_inputs = graph_inputs.to_vec();
+                                    let graph_inputs = graph_inputs.clone();
                                     Ok(Value::Effect(Effect {
                                         ret_ty: instance.type_of_from_port(FromPort::Index(0))?.clone(),
                                         thunk: Rc::new(move || {
-                                            let mut inputs: BTreeMap<usize, Value> = Default::default();
-                                            inputs.insert(0, effect.run()?);
-                                            match instance.evaluate(&graph_inputs, inputs)? {
-                                                Value::Effect(effect) => effect.run(),
+                                            let mut inputs = Inputs::default();
+                                            inputs.insert(0, effect.run()?)?;
+                                            match instance.evaluate(&graph_inputs, &inputs)? {
+                                                Value::Effect(new_effect) => new_effect.run(),
                                                 _ => Err(anyhow!("expected result of Bind instance to be an effect"))
                                             }
                                         })
@@ -431,12 +446,11 @@ impl Instance {
                     }
                 },
                 Op::Graph(g)      => {
-                    let subgraph_inputs: Vec<_> = inputs.into_values().collect();
-                    g.evaluate(&subgraph_inputs, 0)
+                    g.evaluate(inputs, 0).context("failed to evaluate sub-graph")
                 }
                 Op::Add           => {
-                    let v0 = inputs.get(&0).context("port 0 unconnected")?.clone();
-                    let v1 = inputs.get(&1).context("port 1 unconnected")?.clone();
+                    let v0 = inputs.require(0)?.clone();
+                    let v1 = inputs.require(1)?.clone();
                     if let Value::Integer(i0) = v0 && let Value::Integer(i1) = v1 {
                         Ok(Value::Integer(i0 + i1))
                     } else {
@@ -444,8 +458,8 @@ impl Instance {
                     }
                 }
             },
-            InstanceData::Input(i) => graph_inputs.get(*i).context("graph input missing").cloned(),
-            InstanceData::Output(_) => inputs.get(&0).context("port 0 unconnected").cloned()
+            InstanceData::Input(i) => graph_inputs.require(*i).context("graph input missing").cloned(),
+            InstanceData::Output(_) => inputs.require(0).cloned()
         }?;
         Ok(x)
     }
@@ -527,11 +541,13 @@ impl Graph {
     }
 
     pub fn get_input(&self, index: usize) -> Result<NodeIndex> {
-        self.inputs.get(index).copied().with_context(|| format!("input index {} not found", index))
+        let message: String<24> = format!("input index {} not found", index)?;
+        self.inputs.get(index).copied().context(message)
     }
 
     pub fn get_output(&self, index: usize) -> Result<NodeIndex> {
-        self.outputs.get(index).copied().with_context(|| format!("output index {} not found", index))
+        let message: String<25> = format!("output index {} not found", index)?;
+        self.outputs.get(index).copied().context(message)
     }
 
     pub fn add(&mut self, op: Op) -> NodeIndex {
@@ -577,24 +593,24 @@ impl Graph {
     }
 
     // XXX: take output port for target node and evaluate only that output
-    pub fn evaluate_index(&self, graph_inputs: &[Value], index: NodeIndex, port: FromPort) -> Result<Value> {
+    pub fn evaluate_index(&self, graph_inputs: &Inputs, index: NodeIndex, port: FromPort) -> Result<Value> {
         match port {
             FromPort::Instance => Ok(Value::Instance(Box::new(self.g[index].clone()))),
             FromPort::Index(from) => {
                 if from > 0 { todo!(); }
 
-                let mut inputs: BTreeMap<usize, Value> = Default::default();
+                let mut inputs = Inputs::default();
                 for edge in self.g.edges_directed(index, Direction::Incoming) {
                     let v = self.evaluate_index(graph_inputs, edge.source(), edge.weight().from)?;
-                    inputs.insert(edge.weight().to.0, v);
+                    inputs.insert(edge.weight().to.0, v)?;
                 }
 
-                self.g[index].evaluate(graph_inputs, inputs)
+                self.g[index].evaluate(graph_inputs, &inputs)
             }
         }
     }
 
-    pub fn evaluate(&self, graph_inputs: &[Value], index: usize) -> Result<Value> {
+    pub fn evaluate(&self, graph_inputs: &Inputs, index: usize) -> Result<Value> {
         self.evaluate_index(graph_inputs, self.get_output(index).context("output port out of bounds")?, FromPort::Index(0))
     }
 }
