@@ -408,7 +408,7 @@ impl Instance {
         tuple.get(index).context("input port index out of bounds")
     }
 
-    pub fn evaluate(&self, graph_inputs: &Inputs, inputs: &Inputs) -> Result<Value> {
+    pub fn evaluate(&self, graph_inputs: &Inputs, inputs: &Inputs, from: usize) -> Result<Value> {
         let x = match &self.data {
             InstanceData::Op(op) => match op {
                 Op::Constant(val) => Ok(val.clone()),
@@ -432,7 +432,7 @@ impl Instance {
                                         thunk: Rc::new(move || {
                                             let mut inputs = Inputs::default();
                                             inputs.insert(0, effect.run()?)?;
-                                            match instance.evaluate(&graph_inputs, &inputs)? {
+                                            match instance.evaluate(&graph_inputs, &inputs, 0)? {
                                                 Value::Effect(new_effect) => new_effect.run(),
                                                 _ => Err(anyhow!("expected result of Bind instance to be an effect"))
                                             }
@@ -445,8 +445,8 @@ impl Instance {
                         _ => Err(anyhow!("expected v0 for Bind instance to be an effect"))
                     }
                 },
-                Op::Graph(g)      => {
-                    g.evaluate(inputs, 0).context("failed to evaluate sub-graph")
+                Op::Graph(g) => {
+                    g.evaluate(inputs, from).context("failed to evaluate sub-graph")
                 }
                 Op::Add           => {
                     let v0 = inputs.require(0)?.clone();
@@ -596,15 +596,13 @@ impl Graph {
         match port {
             FromPort::Instance => Ok(Value::Instance(Box::new(self.g[index].clone()))),
             FromPort::Index(from) => {
-                if from > 0 { todo!(); }
-
                 let mut inputs = Inputs::default();
                 for edge in self.g.edges_directed(index, Direction::Incoming) {
                     let v = self.evaluate_index(graph_inputs, edge.source(), edge.weight().from)?;
                     inputs.insert(edge.weight().to.0, v)?;
                 }
 
-                self.g[index].evaluate(graph_inputs, &inputs)
+                self.g[index].evaluate(graph_inputs, &inputs, from)
             }
         }
     }
