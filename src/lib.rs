@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use anyhow::anyhow;
 use anyhow::Context as _;
 use anyhow::Result;
+use core::cell::RefCell;
 use derive_more::Deref;
 use derive_more::DerefMut;
 use derive_more::IntoIterator;
@@ -268,6 +269,18 @@ impl Value {
             Self::Instance(instance)   => instance.ty.clone()
         }
     }
+
+    pub fn require_integer(&self) -> Result<i64> {
+        if let Self::Integer(x) = self { Ok(*x) } else { Err(anyhow!("Value not an integer")) }
+    }
+}
+
+pub type Symbol = alloc::string::String;
+
+#[derive(Clone, Debug)]
+pub struct Prototype {
+    pub symbol: Symbol,
+    pub scheme: Scheme
 }
 
 #[derive(Clone, Debug)]
@@ -276,7 +289,20 @@ pub enum Op {
     Pure,
     Bind,
     Graph(Box<Graph>),
-    Add
+    External(Prototype),
+    Add,
+}
+
+impl From<Graph> for Op {
+    fn from(graph: Graph) -> Self {
+        Self::Graph(Box::new(graph))
+    }
+}
+
+impl From<Prototype> for Op {
+    fn from(prototype: Prototype) -> Self {
+        Self::External(prototype)
+    }
 }
 
 impl Op {
@@ -319,6 +345,7 @@ impl Op {
                 }
             },
             Self::Graph(g) => g.scheme.clone(),
+            Self::External(prototype) => prototype.scheme.clone(),
             Self::Add => {
                 let a = TypeVar(0);
                 Scheme {
@@ -408,7 +435,7 @@ impl Instance {
         tuple.get(index).context("input port index out of bounds")
     }
 
-    pub fn evaluate(&self, graph_inputs: &Inputs, inputs: &Inputs, from: usize) -> Result<Value> {
+    pub fn evaluate(&self, library: RefCell<Library>, graph_inputs: &Inputs, inputs: &Inputs, from: usize) -> Result<Value> {
         let x = match &self.data {
             InstanceData::Op(op) => match op {
                 Op::Constant(val) => Ok(val.clone()),
@@ -432,7 +459,7 @@ impl Instance {
                                         thunk: Rc::new(move || {
                                             let mut inputs = Inputs::default();
                                             inputs.insert(0, effect.run()?)?;
-                                            match instance.evaluate(&graph_inputs, &inputs, 0)? {
+                                            match instance.evaluate(RefCell::clone(&library), &graph_inputs, &inputs, 0)? {
                                                 Value::Effect(new_effect) => new_effect.run(),
                                                 _ => Err(anyhow!("expected result of Bind instance to be an effect"))
                                             }
@@ -448,7 +475,12 @@ impl Instance {
                 Op::Graph(g) => {
                     g.evaluate(inputs, from).context("failed to evaluate sub-graph")
                 }
-                Op::Add           => {
+                Op::External(prototype) => {
+                    let owned_library = library.borrow();
+                    let external = owned_library.require(prototype)?;
+                    (external.f)(inputs)
+                },
+                Op::Add => {
                     let v0 = inputs.require(0)?.clone();
                     let v1 = inputs.require(1)?.clone();
                     if let Value::Integer(i0) = v0 && let Value::Integer(i1) = v1 {
@@ -496,7 +528,8 @@ pub struct Graph {
     g: Acyclic<StableDiGraph<Instance, Edge>>,
     scheme: Scheme,
     inputs: Vec<NodeIndex>,
-    outputs: Vec<NodeIndex>
+    outputs: Vec<NodeIndex>,
+    library: RefCell<Library>
 }
 
 impl Graph {
@@ -532,7 +565,8 @@ impl Graph {
             g,
             scheme,
             inputs,
-            outputs
+            outputs,
+            library: Default::default()
         })
     }
 
@@ -592,6 +626,10 @@ impl Graph {
         Ok(())
     }
 
+    pub fn link(&mut self, lib: &Library) {
+        self.library.borrow_mut().link(lib);
+    }
+
     pub fn evaluate_index(&self, graph_inputs: &Inputs, index: NodeIndex, port: FromPort) -> Result<Value> {
         match port {
             FromPort::Instance => Ok(Value::Instance(Box::new(self.g[index].clone()))),
@@ -602,12 +640,70 @@ impl Graph {
                     inputs.insert(edge.weight().to.0, v)?;
                 }
 
-                self.g[index].evaluate(graph_inputs, &inputs, from)
+                self.g[index].evaluate(RefCell::clone(&self.library), graph_inputs, &inputs, from)
             }
         }
     }
 
     pub fn evaluate(&self, graph_inputs: &Inputs, index: usize) -> Result<Value> {
         self.evaluate_index(graph_inputs, self.get_output(index).context("output port out of bounds")?, FromPort::Index(0))
+    }
+}
+
+#[derive(Clone)]
+pub struct External {
+    scheme: Scheme,
+    f: Rc<dyn Fn(&Inputs) -> Result<Value>>
+}
+
+impl core::fmt::Debug for External {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        f.write_str("<external code>")
+    }
+}
+
+impl External {
+    fn new<F: Fn(&Inputs) -> Result<Value> + 'static>(
+        scheme: Scheme,
+        f: F
+    ) -> Self {
+        Self {
+            scheme,
+            f: Rc::new(f)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Library {
+    bindings: HashMap<Symbol, External>
+}
+
+impl Library {
+    pub fn insert<F: Fn(&Inputs) -> Result<Value> + 'static>(
+        &mut self,
+        symbol: &str,
+        scheme: Scheme,
+        f: F
+    ) {
+        self.bindings.insert(symbol.into(), External::new(scheme, f));
+    }
+
+    pub fn prototype(&self, symbol: &str) -> Result<Prototype> {
+        let message: String<85> = format!("no binding found for `{}`", symbol)?;
+        let binding = self.bindings.get(symbol).context(message)?;
+        Ok(Prototype {
+            symbol: symbol.into(),
+            scheme: binding.scheme.clone()
+        })
+    }
+
+    pub fn require(&self, prototype: &Prototype) -> Result<&External> {
+        let message: String<85> = format!("no binding found for `{}`", prototype.symbol)?;
+        self.bindings.get(&prototype.symbol).context(message)
+    }
+
+    pub fn link(&mut self, lib: &Self) {
+        self.bindings.extend(lib.bindings.clone());
     }
 }
