@@ -726,3 +726,97 @@ impl Library {
         self.bindings.extend(lib.bindings.clone());
     }
 }
+
+#[macro_export]
+macro_rules! __tyvar_index {
+    (a) => { 0 };
+    (b) => { 1 };
+    (c) => { 2 };
+    (d) => { 3 };
+    (e) => { 4 };
+    (f) => { 5 };
+    (g) => { 6 };
+    (h) => { 7 };
+    (i) => { 8 };
+    (j) => { 9 };
+    (k) => { 10 };
+    (l) => { 11 };
+    (m) => { 12 };
+    (n) => { 13 };
+    (o) => { 14 };
+    (p) => { 15 };
+    (q) => { 16 };
+    (r) => { 17 };
+    (s) => { 18 };
+    (t) => { 19 };
+    (u) => { 20 };
+    (v) => { 21 };
+    (w) => { 22 };
+    (x) => { 23 };
+    (y) => { 24 };
+    (z) => { 25 };
+}
+
+#[macro_export]
+macro_rules! scheme {
+    // arrow
+    (@arrow $($t:tt)+) => { $crate::scheme!(@arrow_munch [] $($t)+) };
+    (@arrow_munch [$($acc:tt)+] -> $($rest:tt)+) => {
+        $crate::Type::arrow(
+            $crate::scheme!(@type $($acc)+),
+            $crate::scheme!(@arrow $($rest)+)
+        )
+    };
+    (@arrow_munch [$($acc:tt)+]) => { $crate::scheme!(@type $($acc)+) };
+    (@arrow_munch [$($acc:tt)*] $t:tt $($rest:tt)*) => {
+        $crate::scheme!(@arrow_munch [$($acc)* $t] $($rest)*)
+    };
+
+    // primitive types
+    (@type Integer) => { $crate::Type::integer() };
+    (@type Effect $($arg:tt)+) => { $crate::Type::effect($crate::scheme!(@type $($arg)+)) };
+
+    // typevar
+    (@type $v:ident) => { $crate::Type::Var($v) };
+
+    // tuple
+    (@type ( $($inner:tt)* )) => { $crate::scheme!(@tuple [] [] $($inner)* @END) };
+
+    // push element on comma
+    (@tuple [$($out:expr,)*] [$($acc:tt)+] , $($rest:tt)*) => {
+        $crate::scheme!(@tuple [$($out,)* $crate::scheme!(@type $($acc)+), ] [] $($rest)*)
+    };
+
+    // on end sentinel, return tuple
+    (@tuple [$($out:expr,)*] [] @END) => {
+        $crate::Type::tuple(vec![$($out),*])
+    };
+
+    // return tuple on leftover element (no trailing comma)
+    (@tuple [$($out:expr,)*] [$($acc:tt)+] @END) => {
+        $crate::Type::tuple(vec![$($out,)* $crate::scheme!(@type $($acc)+)])
+    };
+
+    // accumulate current element tokens
+    (@tuple [$($out:expr,)*] [$($acc:tt)*] $t:tt $($rest:tt)*) => {
+        $crate::scheme!(@tuple [$($out,)*] [$($acc)* $t] $($rest)*)
+    };
+
+    // entry point with quantification
+    (forall $v0:ident $( $v:ident )* . $($ty:tt)+) => {{
+        let $v0 = $crate::TypeVar($crate::__tyvar_index!($v0));
+        $( let $v = $crate::TypeVar($crate::__tyvar_index!($v)); )*
+        $crate::Scheme {
+            vars: vec![$v0 $(, $v)*],
+            ty: $crate::scheme!(@arrow $($ty)+),
+        }
+    }};
+
+    // entry point with no quantification
+    ($($ty:tt)+) => {{
+        $crate::Scheme {
+            vars: vec![],
+            ty: $crate::scheme!(@arrow $($ty)+),
+        }
+    }};
+}
