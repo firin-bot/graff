@@ -653,6 +653,8 @@ impl Graph {
 #[derive(Clone)]
 pub struct External {
     scheme: Scheme,
+
+    #[allow(clippy::type_complexity)]
     f: Rc<dyn Fn(&Inputs, usize) -> Result<Value>>
 }
 
