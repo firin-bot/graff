@@ -289,7 +289,7 @@ pub enum Op {
     Pure,
     Bind,
     Graph(Box<Graph>),
-    External(Prototype),
+    Binding(Prototype),
     Add,
 }
 
@@ -301,7 +301,7 @@ impl From<Graph> for Op {
 
 impl From<Prototype> for Op {
     fn from(prototype: Prototype) -> Self {
-        Self::External(prototype)
+        Self::Binding(prototype)
     }
 }
 
@@ -345,7 +345,7 @@ impl Op {
                 }
             },
             Self::Graph(g) => g.scheme.clone(),
-            Self::External(prototype) => prototype.scheme.clone(),
+            Self::Binding(prototype) => prototype.scheme.clone(),
             Self::Add => {
                 let a = TypeVar(0);
                 Scheme {
@@ -472,13 +472,13 @@ impl Instance {
                         _ => Err(anyhow!("expected v0 for Bind instance to be an effect"))
                     }
                 },
-                Op::Graph(g) => {
-                    g.evaluate(inputs, from).context("failed to evaluate sub-graph")
-                }
-                Op::External(prototype) => {
+                Op::Graph(g) => g.evaluate(inputs, from).context("failed to evaluate sub-graph"),
+                Op::Binding(prototype) => {
                     let owned_library = library.borrow();
-                    let external = owned_library.require(prototype)?;
-                    (external.f)(inputs)
+                    match owned_library.require(prototype)? {
+                        Binding::Graph(g)           => g.evaluate(inputs, from).context("failed to evaluate external sub-graph"),
+                        Binding::External(external) => (external.f)(inputs, from)
+                    }
                 },
                 Op::Add => {
                     let v0 = inputs.require(0)?.clone();
@@ -653,7 +653,7 @@ impl Graph {
 #[derive(Clone)]
 pub struct External {
     scheme: Scheme,
-    f: Rc<dyn Fn(&Inputs) -> Result<Value>>
+    f: Rc<dyn Fn(&Inputs, usize) -> Result<Value>>
 }
 
 impl core::fmt::Debug for External {
@@ -663,7 +663,7 @@ impl core::fmt::Debug for External {
 }
 
 impl External {
-    fn new<F: Fn(&Inputs) -> Result<Value> + 'static>(
+    fn new<F: Fn(&Inputs, usize) -> Result<Value> + 'static>(
         scheme: Scheme,
         f: F
     ) -> Self {
@@ -674,19 +674,38 @@ impl External {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum Binding {
+    Graph(Box<Graph>),
+    External(External)
+}
+
+impl Binding {
+    pub const fn scheme(&self) -> &Scheme {
+        match self {
+            Self::Graph(graph)       => &graph.scheme,
+            Self::External(external) => &external.scheme
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Library {
-    bindings: HashMap<Symbol, External>
+    bindings: HashMap<Symbol, Binding>
 }
 
 impl Library {
-    pub fn insert<F: Fn(&Inputs) -> Result<Value> + 'static>(
+    pub fn insert_graph(&mut self, symbol: &str, graph: Graph) {
+        self.bindings.insert(symbol.into(), Binding::Graph(Box::new(graph)));
+    }
+
+    pub fn insert_external<F: Fn(&Inputs, usize) -> Result<Value> + 'static>(
         &mut self,
         symbol: &str,
         scheme: Scheme,
         f: F
     ) {
-        self.bindings.insert(symbol.into(), External::new(scheme, f));
+        self.bindings.insert(symbol.into(), Binding::External(External::new(scheme, f)));
     }
 
     pub fn prototype(&self, symbol: &str) -> Result<Prototype> {
@@ -694,11 +713,11 @@ impl Library {
         let binding = self.bindings.get(symbol).context(message)?;
         Ok(Prototype {
             symbol: symbol.into(),
-            scheme: binding.scheme.clone()
+            scheme: binding.scheme().clone()
         })
     }
 
-    pub fn require(&self, prototype: &Prototype) -> Result<&External> {
+    pub fn require(&self, prototype: &Prototype) -> Result<&Binding> {
         let message: String<85> = format!("no binding found for `{}`", prototype.symbol)?;
         self.bindings.get(&prototype.symbol).context(message)
     }
