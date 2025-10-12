@@ -196,18 +196,38 @@ impl Type {
 }
 
 #[derive(Clone, Debug)]
-pub struct Scheme {
-    pub vars: Vec<TypeVar>,
+pub enum Pred {
+    Num(TypeVar)
+}
+
+#[derive(Clone, Debug)]
+pub struct Qual {
+    pub preds: Vec<Pred>,
     pub ty: Type
 }
 
+impl Qual {
+    pub fn substitute(&self, subs: &SubstitutionMap) -> Self {
+        Self {
+            preds: self.preds.clone(),
+            ty: self.ty.substitute(subs)
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Scheme {
+    pub vars: Vec<TypeVar>,
+    pub qual: Qual
+}
+
 impl Scheme {
-    pub fn instantiate(&self, ctx: &mut Context) -> Type {
+    pub fn instantiate(&self, ctx: &mut Context) -> Qual {
         let mut subs = SubstitutionMap::with_capacity(self.vars.len());
         for v in &self.vars {
             subs.insert(*v, Type::Var(ctx.fresh_var()));
         }
-        self.ty.substitute(&subs)
+        self.qual.substitute(&subs)
     }
 }
 
@@ -266,7 +286,7 @@ impl Value {
             Self::Tuple(vals)          => Type::tuple(vals.iter().map(Self::ty).collect()),
             Self::List { elem_ty, .. } => Type::list(elem_ty.clone()),
             Self::Effect(effect)       => Type::effect(effect.ret_ty.clone()),
-            Self::Instance(instance)   => instance.ty.clone()
+            Self::Instance(instance)   => instance.qual.ty.clone()
         }
     }
 
@@ -311,20 +331,26 @@ impl Op {
             Self::Constant(v) => {
                 Scheme {
                     vars: vec![],
-                    ty: Type::arrow(
-                        Type::unit(),
-                        Type::singleton(v.ty())
-                    )
+                    qual: Qual {
+                        preds: vec![],
+                        ty: Type::arrow(
+                            Type::unit(),
+                            Type::singleton(v.ty())
+                        )
+                    }
                 }
             },
             Self::Pure => {
                 let a = TypeVar(0);
                 Scheme {
                     vars: vec![a],
-                    ty: Type::arrow(
-                        Type::singleton(Type::Var(a)),
-                        Type::singleton(Type::effect(Type::Var(a)))
-                    )
+                    qual: Qual {
+                        preds: vec![],
+                        ty: Type::arrow(
+                            Type::singleton(Type::Var(a)),
+                            Type::singleton(Type::effect(Type::Var(a)))
+                        )
+                    }
                 }
             },
             Self::Bind => {
@@ -332,16 +358,19 @@ impl Op {
                 let b = TypeVar(1);
                 Scheme {
                     vars: vec![a, b],
-                    ty: Type::arrow(
-                        Type::tuple(vec![
-                            Type::effect(Type::Var(a)),
-                            Type::arrow(
-                                Type::singleton(Type::Var(a)),
-                                Type::singleton(Type::effect(Type::Var(b)))
-                            )
-                        ]),
-                        Type::singleton(Type::effect(Type::Var(b)))
-                    )
+                    qual: Qual {
+                        preds: vec![],
+                        ty: Type::arrow(
+                            Type::tuple(vec![
+                                Type::effect(Type::Var(a)),
+                                Type::arrow(
+                                    Type::singleton(Type::Var(a)),
+                                    Type::singleton(Type::effect(Type::Var(b)))
+                                )
+                            ]),
+                            Type::singleton(Type::effect(Type::Var(b)))
+                        )
+                    }
                 }
             },
             Self::Graph(g) => g.scheme.clone(),
@@ -350,13 +379,16 @@ impl Op {
                 let a = TypeVar(0);
                 Scheme {
                     vars: vec![a],
-                    ty: Type::arrow(
-                        Type::tuple(vec![
-                            Type::Var(a),
-                            Type::Var(a)
-                        ]),
-                        Type::singleton(Type::Var(a))
-                    )
+                    qual: Qual {
+                        preds: vec![],
+                        ty: Type::arrow(
+                            Type::tuple(vec![
+                                Type::Var(a),
+                                Type::Var(a)
+                            ]),
+                            Type::singleton(Type::Var(a))
+                        )
+                    }
                 }
             }
         }
@@ -365,7 +397,7 @@ impl Op {
     pub fn instantiate(&self, ctx: &mut Context) -> Instance {
         Instance {
             data: self.clone().into(),
-            ty: self.scheme().instantiate(ctx)
+            qual: self.scheme().instantiate(ctx)
         }
     }
 }
@@ -395,7 +427,7 @@ pub struct ToPort(usize);
 #[derive(Clone, Debug)]
 pub struct Instance {
     pub data: InstanceData,
-    pub ty: Type
+    pub qual: Qual
 }
 
 #[derive(Clone, Default)]
@@ -420,9 +452,9 @@ impl Inputs {
 impl Instance {
     pub fn type_of_from_port(&self, port: FromPort) -> Result<&Type> {
         match port {
-            FromPort::Instance => Ok(&self.ty),
+            FromPort::Instance => Ok(&self.qual.ty),
             FromPort::Index(index) => {
-                let (_, o) = self.ty.break_arrow().context("failed to break type as Arrow")?;
+                let (_, o) = self.qual.ty.break_arrow().context("failed to break type as Arrow")?;
                 let tuple = o.break_tuple().context("failed to break Arrow output as Tuple")?;
                 tuple.get(index).context("output port index out of bounds")
             }
@@ -430,7 +462,7 @@ impl Instance {
     }
 
     pub fn type_of_to_port(&self, ToPort(index): ToPort) -> Result<&Type> {
-        let (i, _) = self.ty.break_arrow().context("failed to break type as Arrow")?;
+        let (i, _) = self.qual.ty.break_arrow().context("failed to break type as Arrow")?;
         let tuple = i.break_tuple().context("failed to break Arrow output as Tuple")?;
         tuple.get(index).context("input port index out of bounds")
     }
@@ -537,26 +569,32 @@ impl Graph {
         let ctx = Context::with_initial(scheme.vars.len() as u32);
         let mut g: Acyclic<StableDiGraph<Instance, Edge>> = Default::default();
 
-        let (in_ty, out_ty) = scheme.ty.break_arrow().context("failed to break graph scheme as Arrow")?;
+        let (in_ty, out_ty) = scheme.qual.ty.break_arrow().context("failed to break graph scheme as Arrow")?;
         let in_tuple = in_ty.break_tuple().context("failed to break graph input as Tuple")?;
         let out_tuple = out_ty.break_tuple().context("failed to break graph output as Tuple")?;
 
         let inputs: Vec<_> = in_tuple.iter().enumerate().map(|(i, ty)| {
             g.add_node(Instance {
                 data: InstanceData::Input(i),
-                ty: Type::arrow(
-                    Type::unit(),
-                    Type::singleton(ty.clone())
-                )
+                qual: Qual {
+                    preds: vec![],
+                    ty: Type::arrow(
+                        Type::unit(),
+                        Type::singleton(ty.clone())
+                    )
+                }
             })
         }).collect();
         let outputs: Vec<_> = out_tuple.iter().enumerate().map(|(i, ty)| {
             g.add_node(Instance {
                 data: InstanceData::Output(i),
-                ty: Type::arrow(
-                    Type::singleton(ty.clone()),
-                    Type::unit()
-                )
+                qual: Qual {
+                    preds: vec![],
+                    ty: Type::arrow(
+                        Type::singleton(ty.clone()),
+                        Type::unit()
+                    )
+                }
             })
         }).collect();
 
@@ -619,7 +657,7 @@ impl Graph {
         let indices: Vec<_> = self.g.nodes_iter().collect();
         for i in indices {
             if let Some(n) = self.g.node_weight_mut(i) {
-                n.ty = n.ty.substitute(&subs);
+                n.qual = n.qual.substitute(&subs);
             }
         }
 
@@ -810,7 +848,10 @@ macro_rules! scheme {
         $( let $v = $crate::TypeVar($crate::__tyvar_index!($v)); )*
         $crate::Scheme {
             vars: vec![$v0 $(, $v)*],
-            ty: $crate::scheme!(@arrow $($ty)+),
+            qual: $crate::Qual {
+                preds: vec![],
+                ty: $crate::scheme!(@arrow $($ty)+),
+            }
         }
     }};
 
@@ -818,7 +859,10 @@ macro_rules! scheme {
     ($($ty:tt)+) => {{
         $crate::Scheme {
             vars: vec![],
-            ty: $crate::scheme!(@arrow $($ty)+),
+            qual: $crate::Qual {
+                preds: vec![],
+                ty: $crate::scheme!(@arrow $($ty)+),
+            }
         }
     }};
 }
