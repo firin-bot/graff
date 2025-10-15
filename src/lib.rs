@@ -333,24 +333,7 @@ impl Op {
             Self::Bind => scheme!(forall a b. (Effect a, (a) -> (Effect b)) -> (Effect b)),
             Self::Graph(g) => g.scheme.clone(),
             Self::Binding(prototype) => prototype.scheme.clone(),
-            Self::Add => {
-                let a = TypeVar(0);
-                Scheme {
-                    vars: vec![a],
-                    qual: Qual {
-                        preds: vec![
-                            Pred::Num(a)
-                        ],
-                        ty: Type::arrow(
-                            Type::tuple(vec![
-                                Type::Var(a),
-                                Type::Var(a)
-                            ]),
-                            Type::singleton(Type::Var(a))
-                        )
-                    }
-                }
-            }
+            Self::Add => scheme!(forall a. Num a => (a, a) -> (a)),
         }
     }
 
@@ -728,7 +711,7 @@ impl Library {
 }
 
 #[macro_export]
-macro_rules! __tyvar_index {
+macro_rules! typevar_index {
     (a) => { 0 };
     (b) => { 1 };
     (c) => { 2 };
@@ -758,36 +741,34 @@ macro_rules! __tyvar_index {
 }
 
 #[macro_export]
-macro_rules! scheme {
-    // arrow
-    (@arrow $($t:tt)+) => { $crate::scheme!(@arrow_munch [] $($t)+) };
+macro_rules! ty {
     (@arrow_munch [$($acc:tt)+] -> $($rest:tt)+) => {
         $crate::Type::arrow(
-            $crate::scheme!(@type $($acc)+),
-            $crate::scheme!(@arrow $($rest)+)
+            $crate::ty!(@primary $($acc)+),
+            $crate::ty!($($rest)+)
         )
     };
-    (@arrow_munch [$($acc:tt)+]) => { $crate::scheme!(@type $($acc)+) };
+    (@arrow_munch [$($acc:tt)+]) => { $crate::ty!(@primary $($acc)+) };
     (@arrow_munch [$($acc:tt)*] $t:tt $($rest:tt)*) => {
-        $crate::scheme!(@arrow_munch [$($acc)* $t] $($rest)*)
+        $crate::ty!(@arrow_munch [$($acc)* $t] $($rest)*)
     };
 
     // primitive types
-    (@type Integer) => { $crate::Type::integer() };
-    (@type Effect $($arg:tt)+) => { $crate::Type::effect($crate::scheme!(@type $($arg)+)) };
+    (@primary Integer) => { $crate::Type::integer() };
+    (@primary Effect $($arg:tt)+) => { $crate::Type::effect($crate::ty!(@primary $($arg)+)) };
 
     // interpolated expressions
-    (@type { $e:expr }) => { $e };
+    (@primary { $e:expr }) => { $e };
 
     // typevar
-    (@type $v:ident) => { $crate::Type::Var($v) };
+    (@primary $v:ident) => { $crate::Type::Var($v) };
 
     // tuple
-    (@type ( $($inner:tt)* )) => { $crate::scheme!(@tuple [] [] $($inner)* @END) };
+    (@primary ( $($inner:tt)* )) => { $crate::ty!(@tuple [] [] $($inner)* @END) };
 
     // push element on comma
     (@tuple [$($out:expr,)*] [$($acc:tt)+] , $($rest:tt)*) => {
-        $crate::scheme!(@tuple [$($out,)* $crate::scheme!(@arrow $($acc)+), ] [] $($rest)*)
+        $crate::ty!(@tuple [$($out,)* $crate::ty!($($acc)+), ] [] $($rest)*)
     };
 
     // on end sentinel, return tuple
@@ -797,35 +778,61 @@ macro_rules! scheme {
 
     // return tuple on leftover element (no trailing comma)
     (@tuple [$($out:expr,)*] [$($acc:tt)+] @END) => {
-        $crate::Type::tuple(vec![$($out,)* $crate::scheme!(@arrow $($acc)+)])
+        $crate::Type::tuple(vec![$($out,)* $crate::ty!($($acc)+)])
     };
 
     // accumulate current element tokens
     (@tuple [$($out:expr,)*] [$($acc:tt)*] $t:tt $($rest:tt)*) => {
-        $crate::scheme!(@tuple [$($out,)*] [$($acc)* $t] $($rest)*)
+        $crate::ty!(@tuple [$($out,)*] [$($acc)* $t] $($rest)*)
     };
 
+    // entry point
+    ($($t:tt)+) => { $crate::ty!(@arrow_munch [] $($t)+) };
+}
+
+#[macro_export]
+macro_rules! qual {
+    (@primary Num $v:ident) => { $crate::Pred::Num($v) };
+
+    // entry point with multi qualification
+    ( ( $($plist:tt)+ ) => $($ty:tt)+) => {{
+        todo!()
+    }};
+
+    // entry point with solo qualification
+    ($class:ident $v:ident => $($ty:tt)+) => {{
+        $crate::Qual {
+            preds: vec![$crate::qual!(@primary $class $v)],
+            ty: $crate::ty!($($ty)+)
+        }
+    }};
+
+    // entry point with no qualification
+    ($($ty:tt)+) => {{
+        $crate::Qual {
+            preds: vec![],
+            ty: $crate::ty!($($ty)+)
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! scheme {
     // entry point with quantification
-    (forall $v0:ident $( $v:ident )* . $($ty:tt)+) => {{
-        let $v0 = $crate::TypeVar($crate::__tyvar_index!($v0));
-        $( let $v = $crate::TypeVar($crate::__tyvar_index!($v)); )*
+    (forall $v0:ident $( $v:ident )* . $($qual:tt)+) => {{
+        let $v0 = $crate::TypeVar($crate::typevar_index!($v0));
+        $( let $v = $crate::TypeVar($crate::typevar_index!($v)); )*
         $crate::Scheme {
             vars: vec![$v0 $(, $v)*],
-            qual: $crate::Qual {
-                preds: vec![],
-                ty: $crate::scheme!(@arrow $($ty)+),
-            }
+            qual: $crate::qual!($($qual)+)
         }
     }};
 
     // entry point with no quantification
-    ($($ty:tt)+) => {{
+    ($($qual:tt)+) => {{
         $crate::Scheme {
             vars: vec![],
-            qual: $crate::Qual {
-                preds: vec![],
-                ty: $crate::scheme!(@arrow $($ty)+),
-            }
+            qual: $crate::qual!($($qual)+)
         }
     }};
 }
