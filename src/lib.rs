@@ -768,15 +768,18 @@ macro_rules! ty {
 
     // push element on comma
     (@tuple [$($out:expr,)*] [$($acc:tt)+] , $($rest:tt)*) => {
-        $crate::ty!(@tuple [$($out,)* $crate::ty!($($acc)+), ] [] $($rest)*)
+        $crate::ty!(@tuple
+            [$($out,)* $crate::ty!($($acc)+), ]
+            []
+            $($rest)*)
     };
 
-    // on end sentinel, return tuple
+    // on end sentinel, return
     (@tuple [$($out:expr,)*] [] @END) => {
         $crate::Type::tuple(vec![$($out),*])
     };
 
-    // return tuple on leftover element (no trailing comma)
+    // return on leftover element (no trailing comma)
     (@tuple [$($out:expr,)*] [$($acc:tt)+] @END) => {
         $crate::Type::tuple(vec![$($out,)* $crate::ty!($($acc)+)])
     };
@@ -792,11 +795,36 @@ macro_rules! ty {
 
 #[macro_export]
 macro_rules! qual {
+    // push element on comma
+    (@pred_list [$($out:expr,)*] [$($acc:tt)+] , $($rest:tt)*) => {
+        $crate::qual!(@pred_list
+            [$($out,)* $crate::qual!(@primary $($acc)+), ]
+            []
+            $($rest)*
+        )
+    };
+
+    // on end sentinel, return
+    (@pred_list [$($out:expr,)*] [] @END) => { vec![$($out),*] };
+
+    // return on leftover element (no trailing comma)
+    (@pred_list [$($out:expr,)*] [$($acc:tt)+] @END) => {
+        vec![$($out,)* $crate::qual!(@primary $($acc)+)]
+    };
+
+    // accumulate current element tokens
+    (@pred_list [$($out:expr,)*] [$($acc:tt)*] $t:tt $($rest:tt)*) => {
+        $crate::qual!(@pred_list [$($out,)*] [$($acc)* $t] $($rest)*)
+    };
+
     (@primary Num $v:ident) => { $crate::Pred::Num($v) };
 
     // entry point with multi qualification
     ( ( $($plist:tt)+ ) => $($ty:tt)+) => {{
-        todo!()
+        $crate::Qual {
+            preds: $crate::qual!(@pred_list [] [] $($plist)* @END),
+            ty: $crate::ty!($($ty)+)
+        }
     }};
 
     // entry point with solo qualification
