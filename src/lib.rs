@@ -328,51 +328,9 @@ impl From<Prototype> for Op {
 impl Op {
     pub fn scheme(&self) -> Scheme {
         match self {
-            Self::Constant(v) => {
-                Scheme {
-                    vars: vec![],
-                    qual: Qual {
-                        preds: vec![],
-                        ty: Type::arrow(
-                            Type::unit(),
-                            Type::singleton(v.ty())
-                        )
-                    }
-                }
-            },
-            Self::Pure => {
-                let a = TypeVar(0);
-                Scheme {
-                    vars: vec![a],
-                    qual: Qual {
-                        preds: vec![],
-                        ty: Type::arrow(
-                            Type::singleton(Type::Var(a)),
-                            Type::singleton(Type::effect(Type::Var(a)))
-                        )
-                    }
-                }
-            },
-            Self::Bind => {
-                let a = TypeVar(0);
-                let b = TypeVar(1);
-                Scheme {
-                    vars: vec![a, b],
-                    qual: Qual {
-                        preds: vec![],
-                        ty: Type::arrow(
-                            Type::tuple(vec![
-                                Type::effect(Type::Var(a)),
-                                Type::arrow(
-                                    Type::singleton(Type::Var(a)),
-                                    Type::singleton(Type::effect(Type::Var(b)))
-                                )
-                            ]),
-                            Type::singleton(Type::effect(Type::Var(b)))
-                        )
-                    }
-                }
-            },
+            Self::Constant(v) => scheme!(() -> ({ v.ty() })),
+            Self::Pure => scheme!(forall a. (a) -> (Effect a)),
+            Self::Bind => scheme!(forall a b. (Effect a, (a) -> (Effect b)) -> (Effect b)),
             Self::Graph(g) => g.scheme.clone(),
             Self::Binding(prototype) => prototype.scheme.clone(),
             Self::Add => {
@@ -380,7 +338,9 @@ impl Op {
                 Scheme {
                     vars: vec![a],
                     qual: Qual {
-                        preds: vec![],
+                        preds: vec![
+                            Pred::Num(a)
+                        ],
                         ty: Type::arrow(
                             Type::tuple(vec![
                                 Type::Var(a),
@@ -816,6 +776,9 @@ macro_rules! scheme {
     (@type Integer) => { $crate::Type::integer() };
     (@type Effect $($arg:tt)+) => { $crate::Type::effect($crate::scheme!(@type $($arg)+)) };
 
+    // interpolated expressions
+    (@type { $e:expr }) => { $e };
+
     // typevar
     (@type $v:ident) => { $crate::Type::Var($v) };
 
@@ -824,7 +787,7 @@ macro_rules! scheme {
 
     // push element on comma
     (@tuple [$($out:expr,)*] [$($acc:tt)+] , $($rest:tt)*) => {
-        $crate::scheme!(@tuple [$($out,)* $crate::scheme!(@type $($acc)+), ] [] $($rest)*)
+        $crate::scheme!(@tuple [$($out,)* $crate::scheme!(@arrow $($acc)+), ] [] $($rest)*)
     };
 
     // on end sentinel, return tuple
@@ -834,7 +797,7 @@ macro_rules! scheme {
 
     // return tuple on leftover element (no trailing comma)
     (@tuple [$($out:expr,)*] [$($acc:tt)+] @END) => {
-        $crate::Type::tuple(vec![$($out,)* $crate::scheme!(@type $($acc)+)])
+        $crate::Type::tuple(vec![$($out,)* $crate::scheme!(@arrow $($acc)+)])
     };
 
     // accumulate current element tokens
