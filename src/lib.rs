@@ -456,12 +456,12 @@ impl Instance {
                     }
                 },
                 Op::Add => {
-                    let v0 = inputs.require(0)?.clone();
-                    let v1 = inputs.require(1)?.clone();
-                    if let Value::Integer(i0) = v0 && let Value::Integer(i1) = v1 {
-                        Ok(Value::Integer(i0 + i1))
-                    } else {
-                        Err(anyhow!("invalid type for Add instance"))
+                    let v0 = inputs.require(0)?;
+                    let v1 = inputs.require(1)?;
+                    match (v0, v1) {
+                        (Value::Integer(x), Value::Integer(y)) => Ok(Value::Integer(x + y)),
+                        (Value::Real(x),    Value::Real(y))    => Ok(Value::Real(x + y)),
+                        _ => anyhow::bail!("invalid type for Add instance")
                     }
                 }
             },
