@@ -200,6 +200,22 @@ pub enum Pred {
     Num(TypeVar)
 }
 
+impl Pred {
+    pub fn check(&self, subs: &SubstitutionMap) -> Result<()> {
+        match self {
+            Self::Num(a) => {
+                let ty = Type::Var(*a).substitute(subs);
+                match ty {
+                    Type::App(TypeCon::Integer, _) |
+                    Type::App(TypeCon::Real, _) => Ok(()),
+                    Type::Var(_)                => anyhow::bail!("ambiguous `Num` constraint"),
+                    _                           => anyhow::bail!("`{:?}` is not an instance of `Num`", ty)
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Qual {
     pub preds: Vec<Pred>,
@@ -601,6 +617,13 @@ impl Graph {
         for i in indices {
             if let Some(n) = self.g.node_weight_mut(i) {
                 n.qual = n.qual.substitute(&subs);
+            }
+        }
+
+        for i in self.g.nodes_iter() {
+            let n = &self.g[i];
+            for pred in &n.qual.preds {
+                pred.check(&subs)?;
             }
         }
 
